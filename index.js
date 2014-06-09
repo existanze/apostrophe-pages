@@ -2,6 +2,7 @@ var async = require('async');
 var _ = require('lodash');
 var extend = require('extend');
 var path = require('path');
+var subdomain = require("../../local/subdomain");
 
 RegExp.quote = require('regexp-quote');
 
@@ -10,12 +11,18 @@ module.exports = function(options, callback) {
 };
 
 function pages(options, callback) {
+
   var apos = options.apos;
   var app = options.app;
   var self = this;
   var aposPages = this;
   self._action = '/apos-pages';
   self._apos = apos;
+
+  var _subdomain = subdomain.subdomain({
+    baseHost: 'fotis:3000'
+  });
+
 
   // Usage: app.get('*', pages.serve({ typePath: __dirname + '/views/pages' }))
   //
@@ -1744,7 +1751,10 @@ function pages(options, callback) {
 
     app.get(self._action + '/get-jqtree', function(req, res) {
       var page;
-      apos.getPage(req, '/', function(err, page) {
+
+      var prefix = _subdomain.hostToSlug(req);
+
+      apos.getPage(req, prefix, function(err, page) {
         if (!page) {
           res.statusCode = 404;
           return res.send('No Pages');
