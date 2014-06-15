@@ -2,7 +2,6 @@ var async = require('async');
 var _ = require('lodash');
 var extend = require('extend');
 var path = require('path');
-var subdomain = require("../../local/subdomain");
 
 RegExp.quote = require('regexp-quote');
 
@@ -18,11 +17,7 @@ function pages(options, callback) {
   var aposPages = this;
   self._action = '/apos-pages';
   self._apos = apos;
-
-  var _subdomain = subdomain.subdomain({
-    baseHost: 'fotis:3000'
-  });
-
+  var _subdomain = options.multi;
 
   // Usage: app.get('*', pages.serve({ typePath: __dirname + '/views/pages' }))
   //
