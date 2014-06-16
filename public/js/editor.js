@@ -331,7 +331,7 @@ function AposPages() {
           tags: $el.find('[data-name="tags"]').selective('get', { incomplete: true })
         };
 
-        apos.permissions.debrief($el.find('[data-edit-permissions-container]'), data, { propagate: (action === 'edit') });
+        apos.permissions.debrief($el.find('[data-permissions]'), data, { propagate: (action === 'edit') });
 
         _.extend(data, { parent: options.parent, originalSlug: options.slug });
 
@@ -421,7 +421,7 @@ function AposPages() {
               $li.find('.jqtree-element').append($('<span class="apos-reorganize-controls"></span>'))
               // Append a link to the jqtree-element div.
               // The link has a url '#node-[id]' and a data property 'node-id'.
-              var link = $('<a class="apos-visit"></a>');
+              var link = $('<a class="apos-visit" target="_blank"></a>');
               link.attr('data-node-id', node.id);
               link.attr('data-visit', '1');
               link.attr('href', '#');
@@ -443,7 +443,9 @@ function AposPages() {
             var node = $tree.tree('getNodeById', nodeId);
             // TODO: this is an assumption about where the root of the page tree
             // is being served
-            window.location.href = node.slug;
+            var tab = window.open(node.slug, '_blank');
+            tab.focus();
+            // window.location.href = ;
             return false;
           });
 
