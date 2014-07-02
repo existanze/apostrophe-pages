@@ -160,9 +160,10 @@ function pages(options, callback) {
 
       function time(fn, name) {
         return function(callback) {
+          // console.log(name + ' {');
           var start = now();
           return fn(function(err) {
-            // console.log(name + ': ' + (now() - start));
+            // console.log('} ' + (now() - start));
             return callback(err);
           });
         };
@@ -1018,7 +1019,7 @@ function pages(options, callback) {
       if (_.isEmpty(action)) {
         return setImmediate(callback);
       }
-      return apos.pages.update({ path: matchParentPathPrefix }, action, callback);
+      return apos.pages.update({ path: matchParentPathPrefix }, action, { multi: true }, callback);
     }
     function finish(err) {
       if (err) {
@@ -1279,7 +1280,7 @@ function pages(options, callback) {
     seoDescription = apos.sanitizeString(data.seoDescription).trim();
 
     published = apos.sanitizeBoolean(data.published, true);
-    orphan = apos.sanitizeBoolean(req.body.orphan, false);
+    orphan = apos.sanitizeBoolean(data.orphan, false);
 
     tags = apos.sanitizeTags(data.tags);
     type = determineType(data.type);
@@ -1308,6 +1309,10 @@ function pages(options, callback) {
     }
 
     function permissions(callback) {
+      if (!apos.permissions.can(req, 'publish-page', parent)) {
+        // I can create a child page but I can't publish it
+        published = false;
+      }
       if (!apos.permissions.can(req, 'edit-page', parent)) {
         return callback('forbidden');
       }
