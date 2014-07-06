@@ -1771,7 +1771,6 @@ function pages(options, callback) {
           });
           // Recursively build a tree in the format jqtree expects
           function pageToJqtree(page) {
-            console.log("pageToJqtree",page.slug);
             var info = {
               label: page.title,
               slug: page.slug,
