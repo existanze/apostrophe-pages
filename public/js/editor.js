@@ -83,12 +83,6 @@ function AposPages() {
     if (!options) {
       options = {};
     }
-    if (!options.root) {
-      options.root = apos.data.aposPages.root;
-    }
-
-    // Allow / or /pages/ to be specified, just quietly fix it
-    options.root = options.root.replace(/\/$/, '');
 
     // Available in other scopes
     aposPages.options = options;
@@ -114,7 +108,7 @@ function AposPages() {
         $el = apos.modalFromTemplate('.apos-new-page-settings', {
           init: function(callback) {
 
-            populateType(options.pageType);
+            populateType(options.pageType, true);
 
             // Copy parent's published status
             //
@@ -135,7 +129,6 @@ function AposPages() {
                 type = options.pageType;
               }
 
-              // $el.findByName('published').val(apos.data.pages.parent.published)
               // Copy parent permissions
               enablePermissions(apos.data.aposPages.page, true);
               if (options.title) {
@@ -157,13 +150,13 @@ function AposPages() {
 
         // Get a more robust JSON representation that includes
         // joined objects if any
-        $.getJSON(aposPages.options.root + apos.data.aposPages.page.slug + '?pageInformation=json', function(data) {
+        $.getJSON(apos.data.aposPages.page.slug + '?pageInformation=json', function(data) {
           apos.data.aposPages.page = data;
           defaults = data;
           $el = apos.modalFromTemplate('.apos-edit-page-settings', {
             save: save,
             init: function(callback) {
-              populateType(defaults.type);
+              populateType(defaults.type, false);
 
               // TODO: refactor this frequently used dance of boolean values
               // into editor.js or content.js
@@ -222,13 +215,55 @@ function AposPages() {
         return false;
       });
 
-      function populateType(presetType) {
+      function populateType(presetType, insert) {
         var $type = $el.find('[name=type]');
         $type.html('');
         var found = false;
         var $options;
         var type;
-        _.each(apos.data.aposPages.menu || apos.data.aposPages.types, function(type) {
+
+        var choices = apos.data.aposPages.menu || apos.data.aposPages.types;
+
+        // Filter choices via childTypes and descendantTypes
+        // options of our ancestors. These filters are
+        // cumulative
+
+        var parent = insert ? apos.data.aposPages.page : apos.data.aposPages.page.parent;
+        var ancestors = apos.data.aposPages.page.ancestors;
+        if (!insert) {
+          // Make sure we only look at our parent once
+          ancestors = _.clone(ancestors);
+          ancestors.pop();
+        }
+
+        var filter;
+
+        if (parent) {
+          type = self.getType(parent.type);
+          if (type) {
+            filter = type.childTypes || type.descendantTypes;
+            if (filter) {
+              choices = _.filter(choices, function(choice) {
+                return _.contains(filter, choice.name);
+              });
+            }
+          }
+        }
+        if (ancestors.length) {
+          _.each(ancestors, function(ancestor) {
+            type = self.getType(ancestor.type);
+            if (type) {
+              var filter = type.descendantTypes;
+              if (filter) {
+                choices = _.filter(choices, function(choice) {
+                  return _.contains(filter, choice.name);
+                });
+              }
+            }
+          });
+        }
+
+        _.each(choices, function(type) {
           $option = $('<option></option>');
           // The label is wrapped in i18n
           $option.text( __(type.label) );
@@ -375,20 +410,19 @@ function AposPages() {
           });
         }
 
+        // Use jsonCall so that sparse arrays
+        // (indexed by snippet ID, for instance)
+        // don't turn into flat arrays, also more
+        // efficient generally. -Tom
         function save() {
-          $.ajax(
-            {
-              url: '/apos-pages/' + action,
-              data: data,
-              type: 'POST',
-              dataType: 'json',
-              success: function(data) {
-                window.location.href = aposPages.options.root + data.slug;
-              },
-              error: function() {
-                alert('Server error');
-                callback('Server error');
-              }
+          $.jsonCall('/apos-pages/' + action,
+            data,
+            function(data) {
+              apos.redirect(data.slug);
+            },
+            function() {
+              alert('Server error');
+              callback('Server error');
             }
           );
         }
@@ -410,8 +444,8 @@ function AposPages() {
           $tree = $el.find('[data-tree]');
           $tree.tree({
             data: [],
-            autoOpen: 1,
-            openFolderDelay: 1500,
+            autoOpen: 0,
+            openFolderDelay: 2500,
             dragAndDrop: true,
             onCanMoveTo: function(moved_node, target_node, position) {
               // Cannot create peers of root
@@ -427,7 +461,7 @@ function AposPages() {
               if (node.slug == '/trash') {
                 $li.addClass('apos-trash');
               }
-              $li.find('.jqtree-element').append($('<span class="apos-reorganize-controls"></span>'))
+              $li.find('.jqtree-element').append($('<span class="apos-reorganize-controls"></span>'));
               // Append a link to the jqtree-element div.
               // The link has a url '#node-[id]' and a data property 'node-id'.
               var link = $('<a class="apos-visit" target="_blank"></a>');
@@ -438,21 +472,22 @@ function AposPages() {
               link.append('<i class="icon icon-external-link"></i>');
               $li.find('.jqtree-element .apos-reorganize-controls').append(link);
 
-              link = $('<a class="apos-delete"></a>');
-              link.attr('data-node-id', node.id);
-              link.attr('data-delete', '1');
-              link.attr('href', '#');
-              // link.text('x');
-              link.append('<i class="icon icon-trash"></i>');
+              if (node.publish) {
+                link = $('<a class="apos-delete"></a>');
+                link.attr('data-node-id', node.id);
+                link.attr('data-delete', '1');
+                link.attr('href', '#');
+                // link.text('x');
+                link.append('<i class="icon icon-trash"></i>');
+              }
+
               $li.find('.jqtree-element .apos-reorganize-controls').append(link);
             }
           });
           $tree.on('click', '[data-visit]', function() {
             var nodeId = $(this).attr('data-node-id');
             var node = $tree.tree('getNodeById', nodeId);
-            // TODO: this is an assumption about where the root of the page tree
-            // is being served
-            var tab = window.open(node.slug, '_blank');
+            var tab = window.open(apos.data.prefix + node.slug, '_blank');
             tab.focus();
             // window.location.href = ;
             return false;
@@ -524,10 +559,14 @@ function AposPages() {
                 $el.find('.apos-reorganize-progress').fadeOut();
               },
               error: function() {
-                // This didn't work, probably because something
-                // else has changed in the page tree. Refreshing
-                // is an appropriate response
-                apos.afterYield(function() { reload(null); });
+
+                alert('You may only move pages you are allowed to publish. If you move a page to a new parent, you must be allowed to edit the new parent.');
+
+                apos.afterYield(function() {
+                  reload(function() {
+                    $el.find('.apos-reorganize-progress').fadeOut();
+                  });
+                });
               }
             });
           });
@@ -540,17 +579,11 @@ function AposPages() {
           var page = apos.data.aposPages.page;
           var _id = page._id;
           $.get('/apos-pages/info', { _id: _id }, function(data) {
-            var newPathname = (apos.data.aposPages.root + data.slug).replace(/^\/\//, '/');
-            if (window.location.pathname === newPathname) {
-              apos.change('tree');
-              return callback();
-            } else {
-              // Navigates away, so don't call the callback
-              window.location.pathname = newPathname;
-            }
+            var newPathname = data.slug.replace(/^\/\//, '/');
+            apos.redirect(newPathname);
           }).error(function() {
             // If the page no longer exists, navigate away to home page
-            window.location.pathname = apos.data.aposPages.root;
+            apos.redirect('/');
           });
         }
       });
@@ -580,7 +613,7 @@ function AposPages() {
           success: function(data) {
             if(data.status === 'ok') {
               alert('Moved to the trash. Select "Reorganize" from the "Page" menu to drag it back out.');
-              window.location.href = aposPages.options.root + data.parent;
+              apos.redirect(data.parent);
             } else {
               alert(data.status);
             }
@@ -638,4 +671,3 @@ function AposPages() {
 // There is only one instance of AposPages. TODO: provide
 // for substituting a subclass
 window.aposPages = new AposPages();
-

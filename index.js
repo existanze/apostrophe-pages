@@ -180,7 +180,7 @@ function pages(options, callback) {
       // TODO: move this to middleware for even more general availability in Apostrophe.
       // See: https://github.com/visionmedia/express/issues/1377
       if (!req.absoluteUrl) {
-        req.absoluteUrl = req.protocol + '://' + req.get('Host') + req.url;
+        req.absoluteUrl = req.protocol + '://' + req.get('Host') + apos.prefix + req.url;
       }
 
       req.extras = {};
@@ -190,9 +190,23 @@ function pages(options, callback) {
       function page(callback) {
         // Get content for this page
         req.slug = req.params[0];
+
+        // Fix common screwups in URLs: leading/trailing whitespace,
+        // presence of trailing slashes (but always restore the
+        // leading slash). Express leaves escape codes uninterpreted
+        // in the path, so look for %20, not ' '.
+        req.slug = req.slug.trim();
+        req.slug = req.slug.replace(/\/+$/, '');
         if ((!req.slug.length) || (req.slug.charAt(0) !== '/')) {
           req.slug = '/' + req.slug;
         }
+
+        // Had to change the URL, so redirect to it. TODO: this
+        // contains an assumption that we are mounted at /
+        if (req.slug !== req.params[0]) {
+          return res.redirect(req.slug);
+        }
+
         apos.getPage(req, req.slug, function(e, page, bestPage, remainder) {
           if (e) {
             return callback(e);
@@ -216,7 +230,7 @@ function pages(options, callback) {
           req.remainder = remainder;
 
           if (req.bestPage) {
-            req.bestPage.url = options.root + req.bestPage.slug;
+            req.bestPage.url = apos.prefix + options.root + req.bestPage.slug;
           }
 
           return callback(null);
@@ -256,26 +270,23 @@ function pages(options, callback) {
         }
         async.series({
           ancestors: function(callback) {
-            // If you want tabs you also get ancestors, so that
-            // the home page is available (the parent of tabs).
-            if (options.ancestors || options.tabs || true) {
-              var ancestorOptions = options.ancestorOptions ? _.cloneDeep(options.ancestorOptions) : {};
-              if (!ancestorOptions.childrenOptions) {
-                ancestorOptions.childrenOptions = {};
-              }
-              ancestorOptions.childrenOptions.orphan = false;
-
-              return self.getAncestors(req, req.bestPage, options.ancestorCriteria || {}, ancestorOptions || {}, function(err, ancestors) {
-                req.bestPage.ancestors = ancestors;
-                if (ancestors.length) {
-                  // Also set parent as a convenience
-                  req.bestPage.parent = req.bestPage.ancestors.slice(-1)[0];
-                }
-                return callback(err);
-              });
-            } else {
-              return callback(null);
+            // ancestors are always fetched. You need 'em
+            // for tabs, you need 'em for breadcrumb, you
+            // need 'em for the admin UI. You just need 'em.
+            var ancestorOptions = options.ancestorOptions ? _.cloneDeep(options.ancestorOptions) : {};
+            if (!ancestorOptions.childrenOptions) {
+              ancestorOptions.childrenOptions = {};
             }
+            ancestorOptions.childrenOptions.orphan = false;
+
+            return self.getAncestors(req, req.bestPage, options.ancestorCriteria || {}, ancestorOptions || {}, function(err, ancestors) {
+              req.bestPage.ancestors = ancestors;
+              if (ancestors.length) {
+                // Also set parent as a convenience
+                req.bestPage.parent = req.bestPage.ancestors.slice(-1)[0];
+              }
+              return callback(err);
+            });
           },
           peers: function(callback) {
             if (options.peers || true) {
@@ -513,6 +524,15 @@ function pages(options, callback) {
           ];
         }
 
+        else if (args.contextMenu && req.user) {
+          // This user does NOT have permission to see reorg,
+          // but it might exist already in the contextMenu (why??),
+          // so we have to remove it explicitly.
+          args.contextMenu = _.filter(args.contextMenu, function(item) {
+            return item.name !== 'reorganize-page';
+          });
+        }
+
         _.extend(args, req.extras);
 
         // A simple way to access everything we know about the page
@@ -632,7 +652,7 @@ function pages(options, callback) {
           }
           pages = results.pages;
           _.each(pages, function(page) {
-            page.url = options.root + page.slug;
+            page.url = apos.prefix + options.root + page.slug;
           });
           return callback(null);
         });
@@ -749,7 +769,7 @@ function pages(options, callback) {
       var pagesByPath = {};
       _.each(pages, function(page) {
         page.children = [];
-        page.url = options.root + page.slug;
+        page.url = apos.prefix + options.root + page.slug;
         pagesByPath[page.path] = page;
         var last = page.path.lastIndexOf('/');
         var parentPath = page.path.substr(0, last);
@@ -927,10 +947,14 @@ function pages(options, callback) {
       });
     }
     function permissions(callback) {
-      if (!apos.permissions.can(req, 'publish-page', parent)) {
+      if (!apos.permissions.can(req, 'publish-page', moved)) {
         return callback('forbidden');
       }
-      if (!apos.permissions.can(req, 'publish-page', moved)) {
+      // You can always move a page into the trash. You can
+      // also change the order of subpages if you can
+      // edit the subpage you're moving. Otherwise you
+      // must have edit permissions for the new parent page.
+      if ((oldParent._id !== parent._id) && (parent.path !== 'home/trash') && (!apos.permissions.can(req, 'edit-page', parent))) {
         return callback('forbidden');
       }
       return callback(null);
@@ -1124,7 +1148,12 @@ function pages(options, callback) {
     }
     self.types.push(type);
 
-    apos.pushGlobalCallWhen('user', 'aposPages.addType(?)', { name: type.name, label: type.label });
+    apos.pushGlobalCallWhen('user', 'aposPages.addType(?)', {
+      name: type.name,
+      label: type.label,
+      childTypes: type.childTypes,
+      descendantTypes: type.descendantTypes
+    });
   };
 
   // Get the index type objects corresponding to an instance or the name of an
@@ -1281,7 +1310,6 @@ function pages(options, callback) {
 
     published = apos.sanitizeBoolean(data.published, true);
     orphan = apos.sanitizeBoolean(data.orphan, false);
-
     tags = apos.sanitizeTags(data.tags);
     type = determineType(data.type);
 
@@ -1638,6 +1666,7 @@ function pages(options, callback) {
       def = 'default';
     }
     type = self.getType(typeName);
+
     if (!type) {
       typeName = def;
       // Really basic fallback for things like the search page
@@ -1665,6 +1694,8 @@ function pages(options, callback) {
       return callback(null);
     }
   }
+
+  async.series([ pathIndex ], callback);
 
   if (options.ui) {
     apos.mixinModuleAssets(self, 'pages', __dirname, options);
@@ -1769,7 +1800,99 @@ function pages(options, callback) {
       }
     });
 
-    
+    app.get(self._action + '/get-jqtree', function(req, res) {
+      var page;
+      self.multi.hostToSlug(req,function(prefix){
+
+        apos.getPage(req, prefix, function(err, page) {
+          if (!page) {
+            res.statusCode = 404;
+            return res.send('No Pages');
+          }
+          var data = {
+            label: page.title
+          };
+
+          // trash: 'any' means return both trash and non-trash
+
+          // Don't fetch pages that are part of the tree but explicitly
+          // reject being displayed by "reorganize", such as blog articles
+          // (they are too numerous and are best managed within the blog)
+
+          self.getDescendants(req, page, { reorganize: { $ne: false } }, { depth: 1000, trash: 'any', orphan: 'any', permissions: false }, function(err, children) {
+            page.children = children;
+            // jqtree supports more than one top level node, so we have to pass an array
+            data = [ pageToJqtree(page) ];
+            // Prune pages we can't reorganize
+            data = clean(data);
+            res.send(data);
+          });
+
+          // Recursively build a tree in the format jqtree expects
+          function pageToJqtree(page) {
+            var info = {
+              label: page.title,
+              slug: page.slug,
+              // Available both ways for compatibility with jqtree and
+              // mongodb expectations
+              _id: page._id,
+              id: page._id,
+              // For icons
+              type: page.type,
+              // Also nice for icons and browser-side decisions about what's draggable where
+              trash: page.trash,
+              publish: (page.path === 'home/trash') || apos.permissions.can(req, 'publish-page', page),
+              edit: apos.permissions.can(req, 'edit-page', page)
+            };
+            if (page.children && page.children.length) {
+              info.children = [];
+              // Sort trash after non-trash
+              _.each(page.children, function(child) {
+                if (!child.trash) {
+                  info.children.push(pageToJqtree(child));
+                }
+              });
+              _.each(page.children, function(child) {
+                if (child.trash) {
+                  info.children.push(pageToJqtree(child));
+                }
+              });
+            }
+            return info;
+          }
+
+          // If I can't publish at least one of a node's
+          // descendants, prune it from the tree. Returns
+          // a pruned version of the tree
+
+          function clean(nodes) {
+            mark(nodes, []);
+            return prune(nodes);
+            function mark(nodes, ancestors) {
+              _.each(nodes, function(node) {
+                if (node.publish) {
+                  node.good = true;
+                  _.each(ancestors, function(ancestor) {
+                    ancestor.good = true;
+                  });
+                }
+                mark(node.children || [], ancestors.concat([ node ]));
+              });
+            }
+            function prune(nodes) {
+              var newNodes = [];
+              _.each(nodes, function(node) {
+                node.children = prune(node.children || []);
+                if (node.good) {
+                  newNodes.push(node);
+                }
+              });
+              return newNodes;
+            }
+          }
+        });
+      });
+    });
 
     // Simple JSON access to pages by id. Reorganize uses this to figure out
     // if the page we're sitting on has been moved out from under us.
@@ -1835,10 +1958,21 @@ function pages(options, callback) {
         limit: apos.sanitizeInteger(data.limit, 50),
         skip: apos.sanitizeInteger(data.skip, 0)
       };
+      var ids;
       if (data.term !== undefined) {
         options.titleSearch = data.term;
       } else if (data.values !== undefined) {
-        criteria._id = { $in: data.values };
+        ids = [];
+        if (data.values.length && (typeof(data.values[0]) === 'object')) {
+          ids = _.pluck(data.values, 'value');
+        } else {
+          ids = data.values;
+        }
+        if (!ids.length) {
+          criteria._id = '_never_happens';
+        } else {
+          criteria._id = { $in: ids };
+        }
       } else {
         // Since arrays in REST queries are ambiguous,
         // treat the absence of either parameter as an
@@ -1869,12 +2003,12 @@ function pages(options, callback) {
         }
         var pages = results.pages;
         // Put the pages in id order, $in does NOT do this
-        if (data.values) {
-          pages = apos.orderById(data.values, pages);
+        if (ids) {
+          pages = apos.orderById(ids, pages);
         }
         return res.send(
           JSON.stringify(_.map(pages, function(snippet) {
-              return { label: self.getAutocompleteTitle(snippet), value: snippet._id, slug: snippet.slug };
+            return { label: self.getAutocompleteTitle(snippet), value: snippet._id, slug: snippet.slug };
           }))
         );
       });
@@ -1994,10 +2128,16 @@ function pages(options, callback) {
         _.each(self.revertListeners, function(listener) {
           listener(version);
         });
+
         // Now we can merge the version back onto the page, reverting it.
-        // We don't want a deep merge or appending of arrays, we want simple
-        // replacement of top level properties.
-        _.extend(page, version);
+        // We don't want a deep merge or appending of arrays, we want
+        // simple replacement of top level properties.
+        if (apos.options.workflow) {
+          // Version rollback should be subject to workflow.
+          page.draft = _.clone(version);
+        } else {
+          _.extend(page, version);
+        }
         // Use apos.putPage so that a new version with a new diff is saved
         return apos.putPage(req, page.slug, page, callback);
       }
@@ -2121,8 +2261,6 @@ function pages(options, callback) {
       };
     });
   }
-
-  async.series([ pathIndex ], callback);
 
   function pathIndex(callback) {
     // Unique and sparse together mean that many pages can have no path,
