@@ -1769,66 +1769,7 @@ function pages(options, callback) {
       }
     });
 
-//    app.get(self._action + '/get-jqtree', function(req, res) {
-//      var page;
-//
-//      self.multi.hostToSlug(req,function(prefix){
-//
-//        apos.getPage(req, prefix, function(err, page) {
-//          if (!page) {
-//            res.statusCode = 404;
-//            return res.send('No Pages');
-//          }
-//          var data = {
-//            label: page.title
-//          };
-//
-//          // trash: 'any' means return both trash and non-trash
-//
-//          // Don't fetch pages that are part of the tree but explicitly
-//          // reject being displayed by "reorganize", such as blog articles
-//          // (they are too numerous and are best managed within the blog)
-//
-//          self.getDescendants(req, page, { reorganize: { $ne: false } }, { depth: 1000, trash: 'any', orphan: 'any' }, function(err, children) {
-//            page.children = children;
-//            // jqtree supports more than one top level node, so we have to pass an array
-//            data = [ pageToJqtree(page) ];
-//            res.send(data);
-//          });
-//          // Recursively build a tree in the format jqtree expects
-//          function pageToJqtree(page) {
-//            var info = {
-//              label: page.title,
-//              slug: page.slug,
-//              // Available both ways for compatibility with jqtree and
-//              // mongodb expectations
-//              _id: page._id,
-//              id: page._id,
-//              // For icons
-//              type: page.type,
-//              // Also nice for icons and browser-side decisions about what's draggable where
-//              trash: page.trash
-//            };
-//            if (page.children && page.children.length) {
-//              info.children = [];
-//              // Sort trash after non-trash
-//              _.each(page.children, function(child) {
-//                if (!child.trash) {
-//                  info.children.push(pageToJqtree(child));
-//                }
-//              });
-//              _.each(page.children, function(child) {
-//                if (child.trash) {
-//                  info.children.push(pageToJqtree(child));
-//                }
-//              });
-//            }
-//            return info;
-//          }
-//        });
-//
-//      });
-//    });
+    
 
     // Simple JSON access to pages by id. Reorganize uses this to figure out
     // if the page we're sitting on has been moved out from under us.
