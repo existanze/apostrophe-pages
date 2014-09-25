@@ -1272,24 +1272,47 @@ function pages(options, callback) {
     });
   };
 
-  // Insert a page. The req argument is examined for permissions purposes.
+  // Insert a page. The req argument is examined for
+  // permissions purposes.
   //
-  // The data argument is consulted for title, parent (slug of parent page),
-  // published, tags, type, seoDescription, and pagePermissions fields,
+  // The data argument is consulted for title, parent
+  // (slug of parent page), published, tags, type,
+  // seoDescription, and pagePermissions fields,
   // which are validated here.
   //
   // All other fields are validated via the sanitizer for
-  // the current page type, except that fields with the "type: area" property
-  // may always be introduced as long as they do not override existing properties
-  // that are not areas. This allows the introduction of areas in page templates
-  // without the need for changes in app.js. Such spontaneous areas are still
+  // the specified page type, except that fields with the
+  // "type: area" property may always be introduced as long
+  // as they do not override existing properties
+  // that are not areas. This allows the introduction
+  // of areas in page templates without the need for changes
+  // in app.js. Such spontaneous areas are still
   // sanitized as areas.
   //
-  // You may safely pass in a page object from the browser (req.body), but this
-  // method may also be called to add pages for other reasons. The new page is
+  // You may safely pass in a page object from the browser
+  // (req.body), but this method may also be called to add
+  // pages for other reasons. The new page is
   // the last child of its parent.
+  //
+  // If three arguments are passed, they are req, data
+  // and callback.
+  //
+  // If four arguments are passed, the properties of the
+  // `overrides` object are merged into the page
+  // WITHOUT validation. Use this mechanism to insert a
+  // page of a type that is not available for selection
+  // by the user.
+  //
+  // The callback receives (err, page), where page is
+  // the new page object.
 
-  self.insertPage = function(req, data, callback) {
+  self.insertPage = function(req, data, overrides, callback) {
+
+    if (arguments.length === 3) {
+      callback = overrides;
+      overrides = {};
+    }
+
     var parent;
     var page;
     var parentSlug;
@@ -1377,6 +1400,8 @@ function pages(options, callback) {
 
     function insertPage(callback) {
       page = { title: title, seoDescription: seoDescription, published: published, orphan: orphan, tags: tags, type: type.name, level: parent.level + 1, path: parent.path + '/' + apos.slugify(title), slug: apos.addSlashIfNeeded(parentSlug) + apos.slugify(title), rank: nextRank };
+
+      extend(true, page, overrides);
 
       return async.series({
         applyPermissions: function(callback) {
@@ -1733,11 +1758,40 @@ function pages(options, callback) {
 
     // Move page to trashcan
     app.post(self._action + '/delete', function(req, res) {
+      var slug = apos.sanitizeString(req.body.slug);
+      return self.moveToTrash(req, slug, function(err, parentSlug, changed) {
+        if (err) {
+          return res.send(JSON.stringify({
+            status: err
+          }));
+        }
+        // jqtree likes .id, not ._id
+        _.each(changed, function(info) {
+          info.id = info._id;
+        });
+        return res.send(JSON.stringify({
+          status: 'ok',
+          parent: parentSlug,
+          changed: changed
+        }));
+      });
+    });
+
+    // Accepts `req`, `slug` and `callback`.
+    //
+    // Delivers `err`, `parentSlug` (the slug of the page's
+    // former parent), and `changed` (an array of objects with
+    // _id and slug properties, including all subpages that
+    // had to move too).
+
+    self.moveToTrash = function(req, slug, callback) {
       var trash;
       var page;
       var parent;
       var changed = [];
-      async.series([findTrash, findPage, findParent, movePage], respond);
+      return async.series([findTrash, findPage, findParent, movePage], function(err) {
+        return callback(err, parent && parent.slug, changed);
+      });
 
       function findTrash(callback) {
         // Always only one trash page at level 1, so we don't have to
@@ -1753,7 +1807,7 @@ function pages(options, callback) {
 
       function findPage(callback) {
         // Also checks permissions
-        apos.get(req, { slug: req.body.slug }, { editable: true }, function(err, results) {
+        apos.get(req, { slug: slug }, { editable: true }, function(err, results) {
           if (err || (!results.pages.length)) {
             return callback('Page not found');
           }
@@ -1781,24 +1835,7 @@ function pages(options, callback) {
           return callback(null);
         });
       }
-
-      function respond(err) {
-        if (err) {
-          return res.send(JSON.stringify({
-            status: err
-          }));
-        }
-        // jqtree likes .id, not ._id
-        _.each(changed, function(info) {
-          info.id = info._id;
-        });
-        return res.send(JSON.stringify({
-          status: 'ok',
-          parent: parent.slug,
-          changed: changed
-        }));
-      }
-    });
+    };
 
     app.get(self._action + '/get-jqtree', function(req, res) {
       var page;
@@ -2016,14 +2053,21 @@ function pages(options, callback) {
 
     // Return past versions of a page (just the metadata and the diff),
     // rendered via the versions.html template
-    app.get(self._action + '/versions', function(req, res) {
-      var _id = req.query._id;
+    app.post(self._action + '/versions', function(req, res) {
       var page;
       var versions;
-
       function findPage(callback) {
-        return apos.pages.findOne({ _id: _id }, function(err, pageArg) {
+        var criteria = {};
+        if (req.body._id) {
+          criteria._id = self._apos.sanitizeString(req.body._id);
+        } else {
+          criteria.slug = self._apos.sanitizeString(req.body.slug);
+        }
+        return apos.pages.findOne(criteria, function(err, pageArg) {
           page = pageArg;
+          if (!page) {
+            return callback('notfound');
+          }
           return callback(err);
         });
       }
@@ -2036,7 +2080,7 @@ function pages(options, callback) {
       }
 
       function findVersions(callback) {
-        return apos.versions.find({ pageId: _id }).sort({ createdAt: 1 }).toArray(function(err, versionsArg) {
+        return apos.versions.find({ pageId: page._id }).sort({ createdAt: 1 }).toArray(function(err, versionsArg) {
           if (err) {
             return callback(err);
           }
@@ -2062,10 +2106,12 @@ function pages(options, callback) {
 
       function ready(err) {
         if (err) {
-          res.statusCode = 404;
-          return res.send();
+          return res.send({ status: 'error' });
         } else {
-          return res.send(self.render('versions', { versions: versions }));
+          return res.send({ status: 'ok',
+            html: self.render('versions', { versions: versions }),
+            _id: page._id
+          });
         }
       }
 
@@ -2078,8 +2124,8 @@ function pages(options, callback) {
     };
 
     app.post(self._action + '/revert', function(req, res) {
-      var pageId = req.body.page_id;
-      var versionId = req.body.version_id;
+      var pageId = self._apos.sanitizeString(req.body.pageId);
+      var versionId = self._apos.sanitizeString(req.body.versionId);
       var page;
       var version;
 
@@ -2144,10 +2190,9 @@ function pages(options, callback) {
 
       function ready(err) {
         if (err) {
-          res.statusCode = 404;
-          return res.send();
+          return res.send({ status: 'error' });
         } else {
-          return res.send('OK');
+          return res.send({ status: 'ok' });
         }
       }
 

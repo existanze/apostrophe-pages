@@ -329,7 +329,7 @@ function AposPages() {
           $el.find('[data-type-details]').html('');
         }
         var type = aposPages.getType(typeName);
-        if (type.orphan) {
+        if (type && type.orphan) {
           // Locked for this type
           $el.find('[data-name="notOrphan"]').hide();
         } else {
@@ -374,7 +374,6 @@ function AposPages() {
           orphan: !apos.getBoolean($el.findByName('notOrphan')),
           tags: $el.find('[data-name="tags"]').selective('get', { incomplete: true })
         };
-
         apos.permissions.debrief($el.find('[data-permissions]'), data, { propagate: (action === 'edit') });
 
         _.extend(data, { parent: options.parent, originalSlug: options.slug });
@@ -397,10 +396,15 @@ function AposPages() {
             };
           }
 
+          // This is a hack to allow serializers to detect
+          // the difference between "New Page" and "Edit Page."
+          // TODO: implement this in a more civilized fashion.
+          $el.data('new', $el.hasClass('apos-new-page-settings'));
           return serialize($el, $el.find('[data-type-details]'), function(err, result) {
             if (err) {
               // Block
-              return;
+              aposSchemas.scrollToError($el);
+              return callback('invalid');
             }
             // Use _.extend to copy top level properties directly and avoid
             // a recursive merge and appending of arrays which would prevent us
@@ -628,40 +632,59 @@ function AposPages() {
 
     $('body').on('click', '[data-versions-page]', function() {
       var pageId = apos.data.aposPages.page._id;
-      aposPages.browseVersions(pageId);
+      aposPages.browseVersions({ _id: pageId });
     });
   };
 
-  // This method can also be invoked by snippets and anything else that
-  // is represented by a page.
-  self.browseVersions = function(pageId) {
+  // Load and display the page versions browser for the
+  // page specified by options._id or options.slug. If you
+  // pass a string instead of an object it is assumed
+  // to be an _id. As a convenience, slugs may include
+  // area names; however the version editor displayed currently
+  // affects the entire page.
+
+  self.browseVersions = function(options) {
+    var pageId;
+    if (typeof(options) === 'string') {
+      options = { _id: options };
+    }
+    if (options.slug) {
+      // As a convenience accept slugs that include an
+      // area name and just lop off the area name
+      options.slug = options.slug.replace(/:\S+$/, '');
+    }
     var $el = apos.modalFromTemplate('.apos-versions-page', {
       init: function(callback) {
         $versions = $el.find('[data-versions]');
 
         $versions.on('click', '[data-version-id]', function() {
           var id = $(this).data('versionId');
-          $.post('/apos-pages/revert',
-            { page_id: pageId, version_id: id },
+          $.jsonCall('/apos-pages/revert',
+            { pageId: pageId, versionId: id },
             function(data) {
-              alert('Switched versions.');
-              $el.trigger('aposModalHide');
-              apos.change('revert');
+              if (data.status === 'ok') {
+                alert('Switched versions.');
+                $el.trigger('aposModalHide');
+                apos.change('revert');
+              } else {
+                alert('Server error or version no longer available.');
+              }
             }
-          ).error(function() {
-            alert('Server error or version no longer available.');
-          });
+          );
         });
 
         // Load the available versions
         $template = $versions.find('[data-version].apos-template');
         $template.detach();
         // Easier to render as a nice server side template
-        $.get('/apos-pages/versions', {
-          _id: pageId
-        }, function(data) {
-          $versions.html(data);
-        });
+        $.jsonCall(
+          '/apos-pages/versions',
+          options,
+          function(data) {
+            pageId = data._id;
+            $versions.html(data.html);
+          }
+        );
         return callback();
       }
     });
