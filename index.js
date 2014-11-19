@@ -1,3 +1,6 @@
+/*jshint undef:true */
+/*jshint node:true */
+
 var async = require('async');
 var _ = require('lodash');
 var extend = require('extend');
@@ -85,8 +88,8 @@ function pages(options, callback) {
   // than one page partially matches the URL the longest match is provided.
   //
   // Loaders can thus implement multiple-page experiences of almost any complexity
-  // by paying attention to `req.remainder` and choosing to set `req.type` to
-  // something that suits their purposes. If `req.type` is set by a loader it is
+  // by paying attention to `req.remainder` and choosing to set `req.template` to
+  // something that suits their purposes. If `req.template` is set by a loader it is
   // used instead of the original type of the page to select a template. Usually this
   // process begins by examining `req.bestPage.type` to determine whether it is suitable
   // for this treatment (a blog page, for example, might need to implement virtual
@@ -154,27 +157,30 @@ function pages(options, callback) {
 
       apos.pushLocaleStrings(pageTypesLocaleStrings, req);
 
-      function now() {
-        return Date.now();
-      }
-
       function time(fn, name) {
         return function(callback) {
-          // console.log(name + ' {');
-          var start = now();
+          req.traceIn(name);
           return fn(function(err) {
-            // console.log('} ' + (now() - start));
+            req.traceOut();
             return callback(err);
           });
         };
       }
 
-      var start = now();
+      function timeSync(fn, name) {
+        req.traceIn(name);
+        fn();
+        req.traceOut();
+      }
 
-      // Let's defer slideshow joins until the last possible minute for
-      // all content loaded as part of this request, so we can do it with
-      // one efficient query instead of many queries
-      req.deferredSlideshows = [];
+      // Let's defer various types of widget joins
+      // until the last possible minute for all
+      // content loaded as part of this request, so
+      // we can do it with one efficient query
+      // per type instead of many queries
+
+      req.deferredLoads = {};
+      req.deferredLoaders = {};
 
       // Express doesn't provide the absolute URL the user asked for by default.
       // TODO: move this to middleware for even more general availability in Apostrophe.
@@ -185,7 +191,9 @@ function pages(options, callback) {
 
       req.extras = {};
 
-      return async.series([time(page, 'page'), time(secondChanceLogin, 'secondChanceLogin'), time(relatives, 'relatives'), time(load, 'load'), time(notfound, 'notfound'), time(deferredSlideshows, 'deferred slideshows')], main);
+      req.traceIn('TOTAL');
+
+      return async.series([time(page, 'page'), time(secondChanceLogin, 'secondChanceLogin'), time(relatives, 'relatives'), time(load, 'load'), time(notfound, 'notfound'), time(executeDeferredLoads, 'deferred loads')], main);
 
       function page(callback) {
         // Get content for this page
@@ -251,12 +259,12 @@ function pages(options, callback) {
           return callback(null);
         }
         // Try again with admin privs. If we get a better page,
-        // note the URL in the session and redirect to login
-        return apos.getPage(apos.getTaskReq(), req.slug, function(e, page, bestPage, remainder) {
+        // note the URL in the session and redirect to login.
+        return apos.getPage(apos.getTaskReq(), req.slug, { fields: { slug: 1 } }, function(e, page, bestPage, remainder) {
           if (e) {
             return callback(e);
           }
-          if (page || (bestPage && req.bestPage.slug < bestPage.slug)) {
+          if (page || (bestPage && req.bestPage && req.bestPage.slug < bestPage.slug)) {
             req.session.aposAfterLogin = req.url;
             return res.redirect('/login');
           }
@@ -269,7 +277,7 @@ function pages(options, callback) {
           return callback(null);
         }
         async.series({
-          ancestors: function(callback) {
+          ancestors: time(function(callback) {
             // ancestors are always fetched. You need 'em
             // for tabs, you need 'em for breadcrumb, you
             // need 'em for the admin UI. You just need 'em.
@@ -287,8 +295,8 @@ function pages(options, callback) {
               }
               return callback(err);
             });
-          },
-          peers: function(callback) {
+          }, 'ancestors'),
+          peers: time(function(callback) {
             if (options.peers || true) {
               var ancestors = req.bestPage.ancestors;
               if (!ancestors.length) {
@@ -313,8 +321,8 @@ function pages(options, callback) {
             } else {
               return callback(null);
             }
-          },
-          descendants: function(callback) {
+          }, 'peers'),
+          descendants: time(function(callback) {
             if (options.descendants || true) {
               var descendantOptions = options.descendantOptions ? _.cloneDeep(options.descendantOptions) : {};
               descendantOptions.orphan = false;
@@ -325,8 +333,8 @@ function pages(options, callback) {
             } else {
               return callback(null);
             }
-          },
-          tabs: function(callback) {
+          }, 'descendants'),
+          tabs: time(function(callback) {
             if (options.tabs || true) {
               var tabOptions = options.tabOptions ? _.cloneDeep(options.tabOptions) : {};
               tabOptions.orphan = false;
@@ -337,7 +345,7 @@ function pages(options, callback) {
             } else {
               return callback(null);
             }
-          }
+          }, 'tabs')
         }, callback);
       }
 
@@ -414,8 +422,26 @@ function pages(options, callback) {
         }
       }
 
-      function deferredSlideshows(callback) {
-        return apos.joinSlideshows(req, req.deferredSlideshows, callback);
+      function executeDeferredLoads(callback) {
+        // Keep making passes until there are
+        // no more recursive loads to do; loads
+        // may do joins that require more loads, etc.
+        var deferredLoads;
+        var deferredLoaders;
+        return async.whilst(function() {
+          deferredLoads = req.deferredLoads;
+          deferredLoaders = req.deferredLoaders;
+          req.deferredLoads = {};
+          req.deferredLoaders = {};
+          return !_.isEmpty(deferredLoads);
+        }, function(callback) {
+          return async.eachSeries(
+            _.keys(deferredLoads),
+            function(type, callback) {
+              return deferredLoaders[type](req, deferredLoads[type], callback);
+            },
+            callback);
+        }, callback);
       }
 
       function main(err) {
@@ -461,11 +487,18 @@ function pages(options, callback) {
           } else if (req.page) {
             // Make sure the type is allowed
             req.template = req.page.type;
-            if (_.some(aposPages.types, function(item) {
-              return item.name === req.type;
-            })) {
-              req.template = 'default';
-            }
+            // This check was coded incorrectly and never
+            // actually flunked a missing template. I have
+            // fixed the check, but I don't want to break 0.5 sites.
+            // TODO: revive this code in 0.6 and test more.
+            //
+            // -Tom
+            //
+            // if (!_.some(aposPages.types, function(item) {
+            //   return item.name === req.template;
+            // })) {
+            //   req.template = 'default';
+            // }
           } else {
             res.statusCode = 404;
             req.template = 'notfound';
@@ -479,6 +512,7 @@ function pages(options, callback) {
         }
 
         if (providePage) {
+          req.traceIn('prune page');
           req.pushData({
             aposPages: {
               // Prune the page back so we're not sending everything
@@ -488,6 +522,13 @@ function pages(options, callback) {
               page: apos.prunePage(req.bestPage)
             }
           });
+          req.traceOut();
+        }
+
+        if (typeof(req.contextMenu) === 'function') {
+          // Context menu can be generated on the fly
+          // by a function
+          req.contextMenu = req.contextMenu(req);
         }
 
         var args = {
@@ -533,6 +574,17 @@ function pages(options, callback) {
           });
         }
 
+        if (args.page) {
+          var type = self.getType(args.page.type);
+          if (type && type.childTypes && (!type.childTypes.length)) {
+            // Snip out add page if no
+            // child page types are allowed
+            args.contextMenu = _.filter(args.contextMenu, function(item) {
+              return item.name !== 'new-page';
+            });
+          }
+        }
+
         _.extend(args, req.extras);
 
         // A simple way to access everything we know about the page
@@ -549,14 +601,20 @@ function pages(options, callback) {
           if (options.templatePath) {
             path = options.templatePath + '/' + req.template;
           }
-          if (options.templatePaths) {
-            if (options.templatePaths[type]) {
-              path = options.templatePaths[type] + '/' + req.template;
-            }
-          }
         }
 
-        return res.send(self.renderPage(req, path ? path : req.template, args));
+        var result;
+        timeSync(function() {
+          result = self.renderPage(req, path ? path : req.template, args);
+          if (req.statusCode) {
+            res.statusCode = req.statusCode;
+          }
+        }, 'render');
+
+        req.traceOut();
+        self._apos.traceReport(req);
+
+        return res.send(result);
       }
     };
   };
@@ -858,13 +916,13 @@ function pages(options, callback) {
     var rank;
     var originalPath;
     var originalSlug;
-    async.series([getMoved, getTarget, getOldParent, getParent, permissions, nudgeNewPeers, moveSelf, moveDescendants, trashDescendants ], finish);
+    async.series([getMoved, getTarget, getOldParent, getParent, permissions, nudgeNewPeers, moveSelf, updateRedirects, moveDescendants, trashDescendants ], finish);
     function getMoved(callback) {
       if (moved) {
         return callback(null);
       }
       if (movedSlug.charAt(0) !== '/') {
-        return fail();
+        return callback('not a tree page');
       }
       apos.pages.findOne({ slug: movedSlug }, function(err, page) {
         if (!page) {
@@ -886,7 +944,7 @@ function pages(options, callback) {
         return callback(null);
       }
       if (targetSlug.charAt(0) !== '/') {
-        return fail();
+        return callback('not a tree page');
       }
       apos.pages.findOne({ slug: targetSlug }, function(err, page) {
         if (!page) {
@@ -1014,6 +1072,9 @@ function pages(options, callback) {
         return callback(null);
       });
     }
+    function updateRedirects(callback) {
+      return apos.updateRedirect(originalSlug, moved.slug, callback);
+    }
     function moveDescendants(callback) {
       return self.updateDescendantPathsAndSlugs(moved, originalPath, originalSlug, function(err, changedArg) {
         if (err) {
@@ -1096,14 +1157,24 @@ function pages(options, callback) {
           _id: desc._id,
           slug: newSlug
         });
-        apos.pages.update({ _id: desc._id }, { $set: {
-          // Always matches
-          path: desc.path.replace(matchParentPathPrefix, page.path + '/'),
-          // Might not match, and we don't care (if they edited the slug that far up,
-          // they did so intentionally)
-          slug: newSlug,
-          level: desc.level + (page.level - oldLevel)
-        }}, callback);
+        return async.series({
+          update: function(callback) {
+            return apos.pages.update({ _id: desc._id }, { $set: {
+              // Always matches
+              path: desc.path.replace(matchParentPathPrefix, page.path + '/'),
+              // Might not match, and we don't care (if they edited the slug that far up,
+              // they did so intentionally)
+              slug: newSlug,
+              level: desc.level + (page.level - oldLevel)
+            }}, callback);
+          },
+          redirect: function(callback) {
+            if (desc.slug === newSlug) {
+              return setImmediate(callback);
+            }
+            return apos.updateRedirect(desc.slug, newSlug, callback);
+          }
+        }, callback);
       });
     }, function(err) {
       if (err) {
@@ -1323,8 +1394,19 @@ function pages(options, callback) {
     var published;
     var tags;
     var orphan;
+    var slug;
 
     title = apos.sanitizeString(data.title).trim();
+
+    // Our default page settings modal does not offer
+    // a custom slug for a brand new page (we do have it in
+    // the "edit" modal). However let's support this for
+    // other uses of insertPage. -Tom
+
+    if (data.slug) {
+      slug = self.sanitizeSlug(data.slug);
+    }
+
     // Validation is annoying, automatic cleanup is awesome
     if (!title.length) {
       title = 'New Page';
@@ -1399,7 +1481,10 @@ function pages(options, callback) {
     }
 
     function insertPage(callback) {
-      page = { title: title, seoDescription: seoDescription, published: published, orphan: orphan, tags: tags, type: type.name, level: parent.level + 1, path: parent.path + '/' + apos.slugify(title), slug: apos.addSlashIfNeeded(parentSlug) + apos.slugify(title), rank: nextRank };
+      if (!slug) {
+        slug = apos.addSlashIfNeeded(parentSlug) + apos.slugify(title);
+      }
+      page = { title: title, seoDescription: seoDescription, published: published, orphan: orphan, tags: tags, type: type.name, level: parent.level + 1, path: parent.path + '/' + apos.slugify(title), slug: slug, rank: nextRank };
 
       extend(true, page, overrides);
 
@@ -1429,6 +1514,27 @@ function pages(options, callback) {
       });
     }
 
+  };
+
+  // Sanitize a page slug. Ensures it is a string,
+  // passes it to slugify, ensures there is a leading slash,
+  // et cetera.
+
+  self.sanitizeSlug = function(slug) {
+    slug = apos.slugify(apos.sanitizeString(slug), { allow: '/' });
+    // Make sure they don't turn it into a virtual page
+    if (!slug.match(/^\//)) {
+      slug = '/' + slug;
+    }
+    // Eliminate double slashes
+    slug = slug.replace(/\/+/g, '/');
+    // Eliminate trailing slashes
+    slug = slug.replace(/\/$/, '');
+    // ... But never eliminate the leading /
+    if (!slug.length) {
+      slug = '/';
+    }
+    return slug;
   };
 
   /**
@@ -1482,6 +1588,7 @@ function pages(options, callback) {
     var tags;
     var type;
     var seoDescription;
+    var orphan;
 
     title = apos.sanitizeString(req.body.title).trim();
     seoDescription = apos.sanitizeString(req.body.seoDescription).trim();
@@ -1497,22 +1604,8 @@ function pages(options, callback) {
 
     // Allows simple edits of page settings that aren't interested in changing the slug.
     // If you are allowing slug edits you must supply originalSlug.
-    originalSlug = req.body.originalSlug || req.body.slug;
-    slug = req.body.slug;
-
-    slug = apos.slugify(slug, { allow: '/' });
-    // Make sure they don't turn it into a virtual page
-    if (!slug.match(/^\//)) {
-      slug = '/' + slug;
-    }
-    // Eliminate double slashes
-    slug = slug.replace(/\/+/g, '/');
-    // Eliminate trailing slashes
-    slug = slug.replace(/\/$/, '');
-    // ... But never eliminate the leading /
-    if (!slug.length) {
-      slug = '/';
-    }
+    originalSlug = self.sanitizeSlug(req.body.originalSlug || req.body.slug);
+    slug = self.sanitizeSlug(req.body.slug);
 
     async.series([ allowedTags, getPage, permissions, updatePage, redirect, updateDescendants ], sendPage);
 
@@ -1604,8 +1697,7 @@ function pages(options, callback) {
 
     function sendPage(err) {
       if (err) {
-        console.log('the error:');
-        console.log(err);
+        console.error(err);
         res.statusCode = 500;
         return res.send(err);
       }
@@ -1690,7 +1782,7 @@ function pages(options, callback) {
     if (def === undefined) {
       def = 'default';
     }
-    type = self.getType(typeName);
+    var type = self.getType(typeName);
 
     if (!type) {
       typeName = def;
@@ -1819,7 +1911,7 @@ function pages(options, callback) {
       function findParent(callback) {
         self.getParent(req, page, function(err, parentArg) {
           if (err || (!parentArg)) {
-            return respond('Cannot move the home page to the trash');
+            return callback('Cannot move the home page to the trash');
           }
           parent = parentArg;
           return callback(null);
