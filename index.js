@@ -240,7 +240,7 @@ function pages(options, callback) {
           req.remainder = remainder;
 
           if (req.bestPage) {
-            req.bestPage.url = apos.prefix + options.root + req.bestPage.slug;
+            req.bestPage.url = self._apos.slugToUrl(req.bestPage.slug);
           }
 
           return callback(null);
@@ -383,7 +383,7 @@ function pages(options, callback) {
                 // The new syntax for aposArea() requires a more convincing fake page!
                 // Populate slug and permissions correctly
                 req.extras[item] = page ? page : { slug: item };
-                if (!page) {
+                if (!page && req.user && req.user.permissions.admin) {
                   req.extras[item]._edit = true;
                 }
                 return callback(null);
@@ -731,7 +731,7 @@ function pages(options, callback) {
           }
           pages = results.pages;
           _.each(pages, function(page) {
-            page.url = apos.prefix + options.root + page.slug;
+            page.url = self._apos.slugToUrl(page.slug);
           });
           return callback(null);
         });
@@ -848,7 +848,7 @@ function pages(options, callback) {
       var pagesByPath = {};
       _.each(pages, function(page) {
         page.children = [];
-        page.url = apos.prefix + options.root + page.slug;
+        page.url = self._apos.slugToUrl(page.slug);
         pagesByPath[page.path] = page;
         var last = page.path.lastIndexOf('/');
         var parentPath = page.path.substr(0, last);
@@ -1302,7 +1302,37 @@ function pages(options, callback) {
               _criteria
             ]
           };
-          return apos.get(req, criteria, filters, callback);
+          return apos.get(req, criteria, filters, function(err, results) {
+            if (err) {
+              return callback(err);
+            }
+            if (!results.pages) {
+              return callback(null, results);
+            }
+            // Allow getOptions: { children: true } or
+            // getOptions: { children: { depth: 2 } }
+            if (!(filters && filters.children)) {
+              return callback(null, results);
+            }
+            var childrenOptions = {};
+            if (typeof(filters.children) === 'object') {
+              childrenOptions = filters.children;
+            }
+            return async.eachSeries(results.pages, function(item, callback) {
+              return self.getDescendants(req, item, {}, childrenOptions, function(err, children) {
+                if (err) {
+                  return callback(err);
+                }
+                item.children = children;
+                return callback(null);
+              });
+            }, function(err) {
+              if (err) {
+                return callback(err);
+              }
+              return callback(null, results);
+            });
+          });
         }
       };
     }
